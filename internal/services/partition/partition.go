@@ -25,6 +25,7 @@ type Partition struct {
 	controllerPartitionId string
 	workerPartitionId     string
 	schedulerPartitionId  string
+	schedulerIdMu         sync.RWMutex
 
 	controllerCron gocron.Scheduler
 	workerCron     gocron.Scheduler
@@ -75,7 +76,17 @@ func (p *Partition) GetWorkerPartitionId() string {
 }
 
 func (p *Partition) GetSchedulerPartitionId() string {
+	p.schedulerIdMu.RLock()
+	defer p.schedulerIdMu.RUnlock()
+
 	return p.schedulerPartitionId
+}
+
+func (p *Partition) setSchedulerPartitionId(id string) {
+	p.schedulerIdMu.Lock()
+	defer p.schedulerIdMu.Unlock()
+
+	p.schedulerPartitionId = id
 }
 
 func (p *Partition) AddCleanupMethods(cleanup *cleanup.Cleanup) {
@@ -240,7 +251,7 @@ func (p *Partition) StartSchedulerPartition(ctx context.Context) (func() error, 
 		return p.repo.RebalanceAllSchedulerPartitions(deleteCtx)
 	}
 
-	p.schedulerPartitionId = partitionId
+	p.setSchedulerPartitionId(partitionId)
 
 	// start the schedules
 	_, err = p.schedulerCron.NewJob(
@@ -316,7 +327,7 @@ func (p *Partition) runSchedulerPartitionHeartbeat(ctx context.Context) func() {
 		}
 
 		if partitionId != p.GetSchedulerPartitionId() {
-			p.schedulerPartitionId = partitionId
+			p.setSchedulerPartitionId(partitionId)
 		}
 	}
 }

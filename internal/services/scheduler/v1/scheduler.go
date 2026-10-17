@@ -273,14 +273,31 @@ func (s *Scheduler) Start() (func() error, error) {
 		return nil
 	}
 
-	cleanupQueue, err := s.pubsub.Sub(
-		msgqueue.SchedulerPartitionTopic(s.p.GetSchedulerPartitionId()),
-		postAck,
+	partitionSub := newPartitionSubscription(s.pubsub, postAck)
+
+	if err := partitionSub.sync(s.p.GetSchedulerPartitionId()); err != nil {
+		cancel()
+		return nil, fmt.Errorf("could not subscribe to job processing queue: %w", err)
+	}
+
+	// the partition id changes when the partition is deleted and re-created after a missed
+	// heartbeat, so the subscription must follow it
+	_, err = s.s.NewJob(
+		gocron.DurationJob(time.Second*1),
+		gocron.NewTask(
+			func() {
+				if err := partitionSub.sync(s.p.GetSchedulerPartitionId()); err != nil {
+					s.l.Error().Ctx(ctx).Err(err).Msg("could not resubscribe to scheduler partition")
+				}
+			},
+		),
+		gocron.WithSingletonMode(gocron.LimitModeReschedule),
 	)
 
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("could not subscribe to job processing queue: %w", err)
+		_ = partitionSub.close() // nolint: errcheck
+		return nil, fmt.Errorf("could not schedule partition resubscribe: %w", err)
 	}
 
 	queueResults := s.pool.GetResultsCh()
@@ -330,7 +347,7 @@ func (s *Scheduler) Start() (func() error, error) {
 	cleanup := func() error {
 		cancel()
 
-		if err := cleanupQueue(); err != nil {
+		if err := partitionSub.close(); err != nil {
 			return fmt.Errorf("could not cleanup job processing queue: %w", err)
 		}
 
