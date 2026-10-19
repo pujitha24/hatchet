@@ -919,6 +919,8 @@ func (q *Queuer) runOptimisticQueue(
 		assigned, queueResults, err := q.flushToDatabaseOptimistic(ctx, r, tx, localWorkerIds)
 
 		if err != nil {
+			q.drainAndNack(assignCh)
+
 			return nil, nil, err
 		}
 
@@ -927,6 +929,24 @@ func (q *Queuer) runOptimisticQueue(
 	}
 
 	return allLocalAssigned, allQueueResults, nil
+}
+
+// drainAndNack consumes the remaining results of a tryAssign call that will not
+// be flushed, releasing their reserved slots. The producer goroutines block on
+// sends to an unread channel, and unacked slots are carried as used by every
+// replenish, so both must happen for the batch to be fully abandoned.
+func (q *Queuer) drainAndNack(assignCh <-chan *assignResults) {
+	go func() {
+		for r := range assignCh {
+			nackIds := make([]int, 0, len(r.assigned))
+
+			for _, assignedItem := range r.assigned {
+				nackIds = append(nackIds, assignedItem.AckId)
+			}
+
+			q.s.nack(nackIds)
+		}
+	}()
 }
 
 func (q *Queuer) flushToDatabaseOptimistic(

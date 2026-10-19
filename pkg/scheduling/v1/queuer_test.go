@@ -505,3 +505,37 @@ func TestQueuer_FailedFlushDoesNotReplayItself(t *testing.T) {
 	require.Contains(t, q.unassigned, repo.items[1].ID)
 	q.unassignedMu.Unlock()
 }
+
+func TestDrainAndNackReleasesSlotsOfAbandonedAssignments(t *testing.T) {
+	tenantId := uuid.New()
+	workerId := uuid.New()
+
+	s := newTestScheduler(t, tenantId, &mockAssignmentRepo{})
+	q := &Queuer{s: s}
+
+	w := &worker{ListActiveWorkersResult: testWorker(workerId)}
+	seedActionPools(t, s, "A",
+		newSlot(w, v1repo.SlotTypeDefault),
+		newSlot(w, v1repo.SlotTypeDefault),
+	)
+
+	qis := []*sqlcv1.V1QueueItem{testQI(tenantId, "A", 1), testQI(tenantId, "A", 2)}
+
+	// the results channel is buffered for one result per action, but the
+	// producer sends two, so it blocks until the channel is consumed
+	assignCh := s.tryAssign(context.Background(), qis, nil, nil, nil, nil, nil)
+
+	require.Eventually(t, func() bool {
+		n := 0
+		onLoop(t, s, func() { n = len(s.unackedSlots) })
+		return n == 2
+	}, time.Second, 5*time.Millisecond, "both items should have been assigned")
+
+	q.drainAndNack(assignCh)
+
+	require.Eventually(t, func() bool {
+		n := 0
+		onLoop(t, s, func() { n = len(s.unackedSlots) })
+		return n == 0
+	}, 2*time.Second, 5*time.Millisecond, "abandoned assignments should be nacked")
+}
